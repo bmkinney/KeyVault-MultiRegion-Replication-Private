@@ -1,0 +1,13 @@
+{
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "type": "serviceBusTrigger",
+      "direction": "in",
+      "name": "msg",
+      "queueName": "kv-events",
+      "connection": "ServiceBusConnection",
+      "cardinality": "one"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+# Terraform directories
+.terraform/
+.terraform.lock.hcl
+
+# Terraform state files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Plan output files
+*.tfplan
+tfplan
+
+# Variable files that may contain sensitive data
+*.tfvars
+!terraform.tfvars.example
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI configuration files
+.terraformrc
+terraform.rc
+
+# IDE/Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+#IDE specific files
+*.code-workspace
+.cspell.json
+typos.toml
+
+#Function App files
+functionlogs.zip
+functionlogs/*
+functionlogs*
+
+# OS files
+.DS_Store
+Thumbs.db
+deploy.txt
