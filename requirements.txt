@@ -1,4 +1,5 @@
 azure-functions
 azure-identity
+azure-keyvault-certificates
 azure-keyvault-secrets
 azure-servicebus

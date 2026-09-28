@@ -1,13 +1,13 @@
 
-# Private, Asynchronous Multi‑Region Secret Replication for Azure Key Vault
+# Private, Asynchronous Multi‑Region Secret and Certificate Replication for Azure Key Vault
 
 ## Introduction
 
-This Terraform deployment implements a **private, asynchronous, multi‑region secret replication architecture for Azure Key Vault**. The pattern enables organizations to maintain business continuity before a Microsoft‑declared regional outage. It ensures that a secondary region (Sweden Central) always contains an up‑to‑date replica of secrets stored in the primary region (South Central US).
+This Terraform deployment implements a **private, asynchronous, multi‑region secret and certificate replication architecture for Azure Key Vault**. The pattern enables organizations to maintain business continuity before a Microsoft‑declared regional outage. It ensures that a secondary region (Sweden Central) always contains an up‑to‑date replica of secrets and certificates stored in the primary region (South Central US).
 
 The solution provides:
 
-- Continuous, event‑driven secret replication infrastructure
+- Continuous, event‑driven secret and certificate replication infrastructure
 - Private endpoint and private DNS paths for Key Vault, Storage blob/file, and local Service Bus access
 - Region‑agnostic flexibility with cross‑geography replication
 - Cross-region private endpoint connectivity for both Key Vaults
@@ -73,8 +73,8 @@ Key Vault DNS uses manual A records so each VNet resolves vault names to the pri
 
 Both regions use Standard SKU vaults with RBAC authorization enabled:
 
-- **Primary**: `kv-mrkv-primary` (South Central US)
-- **Secondary**: `kv-mrkv-secondary` (Sweden Central)
+- **Primary**: `kv-mrkv-primary-01` (South Central US)
+- **Secondary**: `kv-mrkv-secondary-01` (Sweden Central)
 
 Both have private endpoints in both regions and purge protection disabled.
 
@@ -105,8 +105,8 @@ The deployment creates 10 private endpoints across both regions:
 
 Both regions use Premium SKU with one messaging partition:
 
-- **Primary**: `sb-mrkv-primary` with public network access enabled
-- **Secondary**: `sb-mrkv-secondary` with public network access enabled
+- **Primary**: `sb-mrkv-primary-01` with public network access enabled
+- **Secondary**: `sb-mrkv-secondary-01` with public network access enabled
 
 Each has a private endpoint in its local region.
 
@@ -123,8 +123,8 @@ Each routes events to a queue named `kv-events` with partitioning disabled. Even
 
 Both Function Apps use Linux with Python 3.11 and Elastic Premium (EP1) plans with managed identities:
 
-- **Primary**: `func-mrkv-primary` with storage `samrkvprimaryfunc`
-- **Secondary**: `func-mrkv-secondary` with storage `samrkvsecondaryfunc`
+- **Primary**: `func-mrkv-primary-01` with storage `samrkvprimaryfunc01`
+- **Secondary**: `func-mrkv-secondary-01` with storage `samrkvsecondaryfunc01`
 
 Both are VNet integrated and use managed identity authentication for all services. All traffic routes through their VNets with `vnet_route_all_enabled` set.
 
@@ -141,12 +141,12 @@ All Functions use System-Assigned Managed Identities automatically created with 
 
 The primary Function has:
 
-- Writer access to the primary Key Vault
-- Writer access to the secondary Key Vault (for replication)
+- Writer access to the primary Key Vault (`Key Vault Secrets Officer` and `Key Vault Certificates Officer`)
+- Writer access to the secondary Key Vault (for replication, same roles)
 - Read/write access to storage in its local region
 - Sender/receiver permissions on both Service Bus namespaces
 
-The secondary Function is configured symmetrically and also has `Key Vault Secrets Officer` on both vaults plus sender/receiver permissions on both Service Bus namespaces.
+The secondary Function is configured symmetrically and also has `Key Vault Secrets Officer` and `Key Vault Certificates Officer` on both vaults plus sender/receiver permissions on both Service Bus namespaces.
 
 > [!NOTE]
 > The current Function app settings bind each Function to its local Service Bus namespace. Cross-namespace Service Bus RBAC is provisioned in Terraform, but the current app configuration uses the local `ServiceBusConnection__fullyQualifiedNamespace` value in each region.
@@ -164,7 +164,7 @@ The solution implements an event-driven pattern that prefers private endpoints f
 │ PRIMARY REGION (South Central US)                           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Secret Created/Updated in Key Vault                        │
+│  Secret/Certificate Created/Updated in Key Vault            │
 │  │                                                          │
 │  ├──→ Event Grid System Topic (internal)                    │
 │  │                                                          │
@@ -173,7 +173,7 @@ The solution implements an event-driven pattern that prefers private endpoints f
 │       └──→ Service Bus Queue: kv-events                     │
 │            │                                                │
 │            ├──→ Function App triggered                      │
-│            │    ├─ Read secret from primary vault           │
+│            │    ├─ Read secret/cert from primary vault      │
 │            │    └─ Write to secondary vault                 │
 │            │                                                │
 │            └──→ Secondary region via private endpoint       │
@@ -187,7 +187,7 @@ The solution implements an event-driven pattern that prefers private endpoints f
 │ SECONDARY REGION (Sweden Central)                           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Secret written to Key Vault (replicated)                   │
+│  Secret/certificate written to Key Vault (replicated)       │
 │                                                             │
 │  (Optional) Replicate back to primary on update             │
 │                                                             │
@@ -203,6 +203,9 @@ The Event Grid System Topics capture and route the following Key Vault events:
 | **SecretNewVersionCreated** | New secret version created or secret updated | Replicate to secondary vault immediately |
 | **SecretNearExpiry** | Secret expiring within 30 days | Logged by the Function; no alerting or rotation workflow is provisioned |
 | **SecretExpired** | Secret has expired | Logged by the Function; no automated recovery workflow is provisioned |
+| **CertificateNewVersionCreated** | New certificate version created, imported, or renewed | Export from source vault and import into the other vault immediately |
+| **CertificateNearExpiry** | Certificate expiring within 30 days | Logged by the Function; no alerting or renewal workflow is provisioned |
+| **CertificateExpired** | Certificate has expired | Logged by the Function; no automated recovery workflow is provisioned |
 
 Each event flows through the Event Subscription to the Service Bus queue, where the Function App processes it as a trigger.
 
@@ -222,24 +225,24 @@ Each event flows through the Event Subscription to the Service Bus queue, where 
 2. Event Subscription routes to Service Bus queue
 3. Queue message delivered via private connection
 4. Service Bus Trigger activates Function App
-5. Function processes message and replicates secret
+5. Function processes message and replicates the secret or certificate
 
 ### Replication workflow
 
-**Primary Function Replication** (`func-mrkv-primary`):
+**Primary Function Replication** (`func-mrkv-primary-01`):
 
 1. **Trigger**: Service Bus message from `kv-events` queue in primary namespace
-2. **Read**: Retrieve secret from `kv-mrkv-primary` using private endpoint
+2. **Read**: Retrieve secret or certificate from `kv-mrkv-primary-01` using private endpoint
 3. **Identify**: Determine if new version or expiry event
-4. **Replicate**: Write secret to `kv-mrkv-secondary` using private endpoint
+4. **Replicate**: Write secret or import certificate to `kv-mrkv-secondary-01` using private endpoint
 5. **Log**: Record replication status in Function App logs
 6. **Acknowledge**: Remove message from Service Bus queue
 
-**Secondary Function Replication** (`func-mrkv-secondary`):
+**Secondary Function Replication** (`func-mrkv-secondary-01`):
 
 1. **Trigger**: Service Bus message from `kv-events` queue in secondary namespace (when deployed)
-2. **Read**: Retrieve secret from `kv-mrkv-secondary`
-3. **Replicate**: Write back to `kv-mrkv-primary` for fail-back scenario
+2. **Read**: Retrieve secret or certificate from `kv-mrkv-secondary-01`
+3. **Replicate**: Write back to `kv-mrkv-primary-01` for fail-back scenario
 4. **Acknowledge**: Process message completion
 
 ### Fail-back and bi-directional replication
@@ -248,8 +251,32 @@ The secondary region's Function App enables fail-back replication:
 
 - **Scenario**: Primary region is degraded or offline
 - **Action**: Updates to secondary Key Vault replicate back to primary
-- **Benefit**: Maintains secret synchronization if primary recovers
+- **Benefit**: Maintains secret and certificate synchronization if primary recovers
 - **Implementation**: Identical Service Bus queue and Function setup in secondary region
+
+### Certificate replication
+
+Certificates are replicated through the same event flow as secrets:
+
+1. **Trigger**: `CertificateNewVersionCreated` event for the new version
+2. **Check exportability**: Read the certificate policy; if the private key is not exportable, log a warning and complete the message without replicating
+3. **Export**: Read the certificate's backing secret version, which contains the PFX (`application/x-pkcs12`) or PEM (`application/x-pem-file`) including the private key
+4. **Import**: Call `import_certificate` on the other vault with the source policy, enabled state, and tags
+
+The backing secret of a certificate also appears as a secret (`managed = true`). The Function skips managed secrets on the secret path so certificates are only replicated through the certificate path.
+
+### Loop prevention
+
+Every replicated version is tagged with `mrkv-replicated-from=<source vault name>`. When the destination vault emits its own new-version event, the Function reads the version, finds the tag, and skips it. Without this guard, each write would bounce between regions indefinitely.
+
+The tag is only set on replicas. Versions created directly in either vault (by users or applications) do not carry it and are replicated normally.
+
+### Certificate replication limitations
+
+- **Non-exportable keys**: Certificates created with `exportable = false` cannot be replicated. The Function logs a warning and skips them.
+- **Name collisions**: Import fails if the destination vault already has a plain secret with the certificate's name. The message is retried and then dead-lettered.
+- **Issuers and contacts**: Certificate issuer configurations (for example, DigiCert or GlobalSign) and certificate contacts are not replicated. Configure them in each vault.
+- **Auto-renewal**: The source policy, including lifetime actions, is imported with the certificate. Auto-renew can therefore run independently in each vault, and each renewal is replicated to the other vault.
 
 ### Dead-letter queue handling
 
@@ -305,19 +332,19 @@ Compress-Archive -Path host.json,requirements.txt,replicatefunc -DestinationPath
 ```powershell
 az functionapp deployment source config-zip `
   --resource-group rg-mrkv-primary `
-  --name func-mrkv-primary `
+  --name func-mrkv-primary-01 `
   --src functionapp.zip `
   --build-remote true
 
 az functionapp restart `
   --resource-group rg-mrkv-primary `
-  --name func-mrkv-primary
+  --name func-mrkv-primary-01
 ```
 
 **Verify deployment**:
 
 ```powershell
-az functionapp function list --resource-group rg-mrkv-primary --name func-mrkv-primary --query "[].name"
+az functionapp function list --resource-group rg-mrkv-primary --name func-mrkv-primary-01 --query "[].name"
 ```
 
 If zip deployment fails with a 503 error, temporarily enable `public_network_access_enabled = true` for the deployment, then re-apply your security configuration afterward.
@@ -331,19 +358,19 @@ Deploy the same function code to the secondary region:
 ```powershell
 az functionapp deployment source config-zip `
   --resource-group rg-mrkv-secondary `
-  --name func-mrkv-secondary `
+  --name func-mrkv-secondary-01 `
   --src functionapp.zip `
   --build-remote true
 
 az functionapp restart `
   --resource-group rg-mrkv-secondary `
-  --name func-mrkv-secondary
+  --name func-mrkv-secondary-01
 ```
 
 **Verify deployment**:
 
 ```powershell
-az functionapp function list --resource-group rg-mrkv-secondary --name func-mrkv-secondary --query "[].name"
+az functionapp function list --resource-group rg-mrkv-secondary --name func-mrkv-secondary-01 --query "[].name"
 ```
 
 Both functions are now deployed and ready to handle cross-region replication.
@@ -356,13 +383,13 @@ The Terraform uses `az storage share-rm create` through `null_resource` to creat
 
 ```powershell
 az storage share-rm show `
-  --storage-account samrkvprimaryfunc `
+  --storage-account samrkvprimaryfunc01 `
   --resource-group rg-mrkv-primary `
   --name func-mrkv-primary-share `
   --output table
 
 az storage share-rm show `
-  --storage-account samrkvsecondaryfunc `
+  --storage-account samrkvsecondaryfunc01 `
   --resource-group rg-mrkv-secondary `
   --name func-mrkv-secondary-share `
   --output table
@@ -379,7 +406,7 @@ Update the secret in primary and verify it propagates to secondary:
 ```bash
 # Update primary secret
 az keyvault secret set \
-  --vault-name kv-mrkv-primary \
+  --vault-name kv-mrkv-primary-01 \
   --name test-p2s \
   --value "updated-value-$(date +%s)"
 
@@ -388,7 +415,7 @@ sleep 10
 
 # Verify update in secondary
 az keyvault secret show \
-  --vault-name kv-mrkv-secondary \
+  --vault-name kv-mrkv-secondary-01 \
   --name test-p2s \
   --query "value" \
   --output tsv
@@ -401,7 +428,7 @@ Update the secret in secondary and verify it propagates back to primary:
 ```bash
 # Update secondary secret
 az keyvault secret set \
-  --vault-name kv-mrkv-secondary \
+  --vault-name kv-mrkv-secondary-01 \
   --name test-s2p \
   --value "updated-value-$(date +%s)"
 
@@ -410,10 +437,59 @@ sleep 10
 
 # Verify update in primary
 az keyvault secret show \
-  --vault-name kv-mrkv-primary \
+  --vault-name kv-mrkv-primary-01 \
   --name test-s2p \
   --query "value" \
   --output tsv
+```
+
+#### Certificate primary to secondary
+
+Create a self-signed certificate in primary and verify it propagates to secondary. The default policy produces an exportable PKCS12 certificate:
+
+```bash
+# Create certificate in primary
+az keyvault certificate create \
+  --vault-name kv-mrkv-primary-01 \
+  --name test-cert-p2s \
+  --policy "$(az keyvault certificate get-default-policy)"
+
+# Certificate replication was observed to take 2-3 minutes; rerun the checks below if the copy is not there yet
+sleep 180
+
+# Thumbprints should match; the secondary copy carries the replication tag
+az keyvault certificate show \
+  --vault-name kv-mrkv-primary-01 \
+  --name test-cert-p2s \
+  --query "x509ThumbprintHex" \
+  --output tsv
+
+az keyvault certificate show \
+  --vault-name kv-mrkv-secondary-01 \
+  --name test-cert-p2s \
+  --query "{thumbprint:x509ThumbprintHex, replicatedFrom:tags.\"mrkv-replicated-from\"}" \
+  --output json
+
+# Loop guard: each vault should have a single version
+az keyvault certificate list-versions --vault-name kv-mrkv-primary-01 --name test-cert-p2s --query "length(@)"
+az keyvault certificate list-versions --vault-name kv-mrkv-secondary-01 --name test-cert-p2s --query "length(@)"
+```
+
+#### Certificate secondary to primary
+
+```bash
+az keyvault certificate create \
+  --vault-name kv-mrkv-secondary-01 \
+  --name test-cert-s2p \
+  --policy "$(az keyvault certificate get-default-policy)"
+
+sleep 180
+
+az keyvault certificate show \
+  --vault-name kv-mrkv-primary-01 \
+  --name test-cert-s2p \
+  --query "{thumbprint:x509ThumbprintHex, replicatedFrom:tags.\"mrkv-replicated-from\"}" \
+  --output json
 ```
 
 ## Troubleshooting and Validation
@@ -427,13 +503,13 @@ These settings were needed during deployment so the Functions could start correc
 ```bash
 az functionapp config appsettings list \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query "[?name=='PRIMARY_KEY_VAULT_URI' || name=='SECONDARY_KEY_VAULT_URI' || name=='PRIMARY_KEY_VAULT_NAME' || name=='SECONDARY_KEY_VAULT_NAME' || name=='ServiceBusConnection__fullyQualifiedNamespace' || name=='ServiceBusConnection__credential' || name=='AzureWebJobsStorage__accountName' || name=='AzureWebJobsStorage__credential' || name=='FUNCTIONS_WORKER_RUNTIME' || name=='WEBSITE_RUN_FROM_PACKAGE'].{name:name,value:value}" \
   --output table
 
 az functionapp show \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query "{subnet:virtualNetworkSubnetId,state:state,hostNames:enabledHostNames}" \
   --output json
 ```
@@ -443,13 +519,13 @@ az functionapp show \
 ```bash
 az functionapp config appsettings list \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query "[?name=='PRIMARY_KEY_VAULT_URI' || name=='SECONDARY_KEY_VAULT_URI' || name=='PRIMARY_KEY_VAULT_NAME' || name=='SECONDARY_KEY_VAULT_NAME' || name=='ServiceBusConnection__fullyQualifiedNamespace' || name=='ServiceBusConnection__credential' || name=='AzureWebJobsStorage__accountName' || name=='AzureWebJobsStorage__credential' || name=='FUNCTIONS_WORKER_RUNTIME' || name=='WEBSITE_RUN_FROM_PACKAGE'].{name:name,value:value}" \
   --output table
 
 az functionapp show \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query "{subnet:virtualNetworkSubnetId,state:state,hostNames:enabledHostNames}" \
   --output json
 ```
@@ -463,7 +539,7 @@ This setting was needed during deployment because zip deploy uses the Function A
 ```bash
 az functionapp show \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query "{publicNetworkAccess:publicNetworkAccess, httpsOnly:httpsOnly}" \
   --output table
 ```
@@ -473,7 +549,7 @@ az functionapp show \
 ```bash
 az functionapp show \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query "{publicNetworkAccess:publicNetworkAccess, httpsOnly:httpsOnly}" \
   --output table
 ```
@@ -493,12 +569,12 @@ This setting was needed during deployment because shared key access is disabled 
 ```bash
 PRIMARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 PRIMARY_STORAGE_ID=$(az storage account show \
   --resource-group rg-mrkv-primary \
-  --name samrkvprimaryfunc \
+  --name samrkvprimaryfunc01 \
   --query id -o tsv | tr -d '\r')
 
 PRIMARY_ROLE_ASSIGNMENTS_URL="https://management.azure.com${PRIMARY_STORAGE_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -515,12 +591,12 @@ az rest \
 ```bash
 SECONDARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 SECONDARY_STORAGE_ID=$(az storage account show \
   --resource-group rg-mrkv-secondary \
-  --name samrkvsecondaryfunc \
+  --name samrkvsecondaryfunc01 \
   --query id -o tsv | tr -d '\r')
 
 SECONDARY_ROLE_ASSIGNMENTS_URL="https://management.azure.com${SECONDARY_STORAGE_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -541,7 +617,7 @@ This setting remains enabled in the current Terraform because it avoids deployme
 ```bash
 az storage account show \
   --resource-group rg-mrkv-primary \
-  --name samrkvprimaryfunc \
+  --name samrkvprimaryfunc01 \
   --query "{publicNetworkAccess:publicNetworkAccess, defaultAction:networkRuleSet.defaultAction, allowSharedKeyAccess:allowSharedKeyAccess}" \
   --output table
 ```
@@ -551,31 +627,34 @@ az storage account show \
 ```bash
 az storage account show \
   --resource-group rg-mrkv-secondary \
-  --name samrkvsecondaryfunc \
+  --name samrkvsecondaryfunc01 \
   --query "{publicNetworkAccess:publicNetworkAccess, defaultAction:networkRuleSet.defaultAction, allowSharedKeyAccess:allowSharedKeyAccess}" \
   --output table
 ```
 
 ### Verify Key Vault RBAC assignments [bash]
 
-These assignments were needed during deployment so the Functions could read and write secrets across both regions once the code was deployed.
+These assignments were needed during deployment so the Functions could read and write secrets and certificates across both regions once the code was deployed.
+
+> [!NOTE]
+> Expected role IDs in the output: `b86a8fe4-44ce-4948-aee5-eccb2c155cd7` = Key Vault Secrets Officer, `a4417e6f-fecd-4de8-b567-7b0420556985` = Key Vault Certificates Officer.
 
 #### Primary Function identity against both vaults
 
 ```bash
 PRIMARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 PRIMARY_VAULT_ID=$(az keyvault show \
   --resource-group rg-mrkv-primary \
-  --name kv-mrkv-primary \
+  --name kv-mrkv-primary-01 \
   --query id -o tsv | tr -d '\r')
 
 SECONDARY_VAULT_ID=$(az keyvault show \
   --resource-group rg-mrkv-secondary \
-  --name kv-mrkv-secondary \
+  --name kv-mrkv-secondary-01 \
   --query id -o tsv | tr -d '\r')
 
 PRIMARY_VAULT_ROLE_ASSIGNMENTS_URL="https://management.azure.com${PRIMARY_VAULT_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -599,17 +678,17 @@ az rest \
 ```bash
 SECONDARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 PRIMARY_VAULT_ID=$(az keyvault show \
   --resource-group rg-mrkv-primary \
-  --name kv-mrkv-primary \
+  --name kv-mrkv-primary-01 \
   --query id -o tsv | tr -d '\r')
 
 SECONDARY_VAULT_ID=$(az keyvault show \
   --resource-group rg-mrkv-secondary \
-  --name kv-mrkv-secondary \
+  --name kv-mrkv-secondary-01 \
   --query id -o tsv | tr -d '\r')
 
 PRIMARY_VAULT_ROLE_ASSIGNMENTS_URL="https://management.azure.com${PRIMARY_VAULT_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -675,7 +754,7 @@ This setting remains enabled in the current Terraform. The deployment uses priva
 ```bash
 az servicebus namespace show \
   --resource-group rg-mrkv-primary \
-  --name sb-mrkv-primary \
+  --name sb-mrkv-primary-01 \
   --query "{publicNetworkAccess:publicNetworkAccess, sku:sku.name, capacity:sku.capacity, premiumPartitions:premiumMessagingPartitions}" \
   --output table
 ```
@@ -685,7 +764,7 @@ az servicebus namespace show \
 ```bash
 az servicebus namespace show \
   --resource-group rg-mrkv-secondary \
-  --name sb-mrkv-secondary \
+  --name sb-mrkv-secondary-01 \
   --query "{publicNetworkAccess:publicNetworkAccess, sku:sku.name, capacity:sku.capacity, premiumPartitions:premiumMessagingPartitions}" \
   --output table
 ```
@@ -699,17 +778,17 @@ These assignments were needed during deployment so the Functions could receive a
 ```bash
 PRIMARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-primary \
-  --name func-mrkv-primary \
+  --name func-mrkv-primary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 PRIMARY_SB_ID=$(az servicebus namespace show \
   --resource-group rg-mrkv-primary \
-  --name sb-mrkv-primary \
+  --name sb-mrkv-primary-01 \
   --query id -o tsv | tr -d '\r')
 
 SECONDARY_SB_ID=$(az servicebus namespace show \
   --resource-group rg-mrkv-secondary \
-  --name sb-mrkv-secondary \
+  --name sb-mrkv-secondary-01 \
   --query id -o tsv | tr -d '\r')
 
 PRIMARY_SB_ROLE_ASSIGNMENTS_URL="https://management.azure.com${PRIMARY_SB_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -733,17 +812,17 @@ az rest \
 ```bash
 SECONDARY_FUNC_PRINCIPAL_ID=$(az functionapp identity show \
   --resource-group rg-mrkv-secondary \
-  --name func-mrkv-secondary \
+  --name func-mrkv-secondary-01 \
   --query principalId -o tsv | tr -d '\r')
 
 PRIMARY_SB_ID=$(az servicebus namespace show \
   --resource-group rg-mrkv-primary \
-  --name sb-mrkv-primary \
+  --name sb-mrkv-primary-01 \
   --query id -o tsv | tr -d '\r')
 
 SECONDARY_SB_ID=$(az servicebus namespace show \
   --resource-group rg-mrkv-secondary \
-  --name sb-mrkv-secondary \
+  --name sb-mrkv-secondary-01 \
   --query id -o tsv | tr -d '\r')
 
 PRIMARY_SB_ROLE_ASSIGNMENTS_URL="https://management.azure.com${PRIMARY_SB_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
@@ -774,7 +853,7 @@ The deployment uses private endpoints for data-plane access, but several platfor
 2. **Function App public network access** is intentionally enabled in this Terraform because zip deployment uses the SCM/Kudu endpoint. Without it, `az functionapp deployment source config-zip` can fail.
 3. **Storage RBAC configuration** is required because shared key access is blocked by policy. The Function runtime and the manual file-share creation flow both depend on Microsoft Entra ID and RBAC.
 4. **Storage account public network access** remains enabled in this deployment to avoid platform and provisioning issues during deployment. Data-plane access for the app still uses private endpoints and private DNS.
-5. **Key Vault RBAC assignments** are required because both Functions must read from one vault and write to the other during replication.
+5. **Key Vault RBAC assignments** are required because both Functions must read from one vault and write to the other during replication. Secret replication uses `Key Vault Secrets Officer`; certificate import uses `Key Vault Certificates Officer`.
 6. **Key Vault network path** matters because the app is designed to reach both vaults over private endpoints from each region. This is what preserves private east-west traffic during replication.
 7. **Service Bus public network access** remains enabled in this deployment. The Function binds through managed identity, while private endpoints provide the private path from the VNets. Keeping public network access enabled also avoids breaking Service Bus namespace operations during setup.
 8. **Function code deployment** is still a required post-deployment step. The infrastructure creates the hosting environment, but replication does not start until the Python package is deployed with remote build enabled.
@@ -794,31 +873,27 @@ Use these commands to verify replication is working in both directions. Run them
 
 ### Testing Prerequisites
 
-The Key Vaults use RBAC-only authorization. Grant your CLI identity the `Key Vault Secrets Officer` role on both vaults before testing:
+The Key Vaults use RBAC-only authorization. Grant your CLI identity the `Key Vault Secrets Officer` and `Key Vault Certificates Officer` roles on both vaults before testing:
 
 ```bash
 # Get your current user's object ID
 USER_OBJECT_ID=$(az ad signed-in-user show --query id --output tsv)
 
-# Primary vault
-az role assignment create \
-  --role "Key Vault Secrets Officer" \
-  --assignee "$USER_OBJECT_ID" \
-  --scope $(az keyvault show --name kv-mrkv-primary --resource-group rg-mrkv-primary --query id --output tsv)
+PRIMARY_VAULT_ID=$(az keyvault show --name kv-mrkv-primary-01 --resource-group rg-mrkv-primary --query id --output tsv)
+SECONDARY_VAULT_ID=$(az keyvault show --name kv-mrkv-secondary-01 --resource-group rg-mrkv-secondary --query id --output tsv)
 
-# Secondary vault
-az role assignment create \
-  --role "Key Vault Secrets Officer" \
-  --assignee "$USER_OBJECT_ID" \
-  --scope $(az keyvault show --name kv-mrkv-secondary --resource-group rg-mrkv-secondary --query id --output tsv)
+for ROLE in "Key Vault Secrets Officer" "Key Vault Certificates Officer"; do
+  az role assignment create --role "$ROLE" --assignee "$USER_OBJECT_ID" --scope "$PRIMARY_VAULT_ID"
+  az role assignment create --role "$ROLE" --assignee "$USER_OBJECT_ID" --scope "$SECONDARY_VAULT_ID"
+done
 ```
 
 > [!NOTE]
 > Role assignments can take 1–2 minutes to propagate. If you receive a 403 Forbidden error, wait and retry.
-> [!WARNING]
-> **Replication loop**: Both Function Apps replicate any `SecretNewVersionCreated` event. Updates to the primary vault trigger replication to secondary, which then triggers replication back to primary. This is expected for bi-directional sync but causes repeated queue messages. Use distinct secret names for each test direction (e.g., `test-p2s`, `test-s2p`) to observe each direction independently.
 > [!NOTE]
-> `SecretNearExpiry` and `SecretExpired` events are routed to Service Bus by Terraform, but the current Function code only logs those events. No alerting, notification, or automated rotation workflow is included in this repo.
+> **Loop prevention**: Replicated versions are tagged `mrkv-replicated-from`, and the Function skips tagged versions, so each update produces one replica rather than bouncing between regions. See [Loop prevention](#loop-prevention).
+> [!NOTE]
+> `SecretNearExpiry`, `SecretExpired`, `CertificateNearExpiry`, and `CertificateExpired` events are routed to Service Bus by Terraform, but the current Function code only logs those events. No alerting, notification, or automated rotation workflow is included in this repo.
 
 ### Check Service Bus queue status
 
@@ -827,14 +902,14 @@ Monitor the Service Bus queues to ensure messages are being processed:
 ```bash
 # Primary Service Bus queue
 az servicebus queue show \
-  --namespace-name sb-mrkv-primary \
+  --namespace-name sb-mrkv-primary-01 \
   --resource-group rg-mrkv-primary \
   --name kv-events \
   --query "{active:countDetails.activeMessageCount, deadLetter:countDetails.deadLetterMessageCount}"
 
 # Secondary Service Bus queue
 az servicebus queue show \
-  --namespace-name sb-mrkv-secondary \
+  --namespace-name sb-mrkv-secondary-01 \
   --resource-group rg-mrkv-secondary \
   --name kv-events \
   --query "{active:countDetails.activeMessageCount, deadLetter:countDetails.deadLetterMessageCount}"
@@ -849,13 +924,13 @@ If replication is not working, check the dead-letter queue for failed messages:
 ```bash
 # Primary dead-letter queue
 az servicebus queue show \
-  --namespace-name sb-mrkv-primary \
+  --namespace-name sb-mrkv-primary-01 \
   --resource-group rg-mrkv-primary \
   --name "kv-events/$DeadLetterQueue"
 
 # Secondary dead-letter queue
 az servicebus queue show \
-  --namespace-name sb-mrkv-secondary \
+  --namespace-name sb-mrkv-secondary-01 \
   --resource-group rg-mrkv-secondary \
   --name "kv-events/$DeadLetterQueue"
 ```
@@ -866,19 +941,19 @@ Dead-lettered messages indicate replication failures that require investigation.
 
 ### Normal operation (forward replication)
 
-1. Secret created/updated in primary Key Vault (`kv-mrkv-primary`)
+1. Secret or certificate created/updated in primary Key Vault (`kv-mrkv-primary-01`)
 2. Event Grid System Topic emits event
-3. Event routed to Service Bus queue (`sb-mrkv-primary`)
-4. Function (`func-mrkv-primary`) triggered by queue message
-5. Function reads secret from primary vault via private endpoint
-6. Function writes secret to secondary vault (`kv-mrkv-secondary`) via private endpoint
+3. Event routed to Service Bus queue (`sb-mrkv-primary-01`)
+4. Function (`func-mrkv-primary-01`) triggered by queue message
+5. Function reads the secret, or the certificate and its backing secret, from primary vault via private endpoint
+6. Function writes the secret or imports the certificate into secondary vault (`kv-mrkv-secondary-01`) via private endpoint, tagged `mrkv-replicated-from`
 
 ### Fail-back operation (reverse replication)
 
-1. Secret created/updated in secondary Key Vault (`kv-mrkv-secondary`)
+1. Secret or certificate created/updated in secondary Key Vault (`kv-mrkv-secondary-01`)
 2. Event Grid System Topic emits event (`evgt-kv-mrkv-secondary`)
-3. Event routed to Service Bus queue (`sb-mrkv-secondary`)
-4. Function (`func-mrkv-secondary`) triggered
+3. Event routed to Service Bus queue (`sb-mrkv-secondary-01`)
+4. Function (`func-mrkv-secondary-01`) triggered
 5. Function replicates to primary vault via cross-region private endpoint
 
 ### Regional degradation scenarios
@@ -909,18 +984,18 @@ This deployment follows a consistent naming pattern:
 | -------------- | -------------- | ---------------- |
 | Resource Group | `rg-mrkv-primary` | `rg-mrkv-secondary` |
 | Virtual Network | `vnet-mrkv-primary` | `vnet-mrkv-secondary` |
-| Key Vault | `kv-mrkv-primary` | `kv-mrkv-secondary` |
-| Service Bus | `sb-mrkv-primary` | `sb-mrkv-secondary` |
+| Key Vault | `kv-mrkv-primary-01` | `kv-mrkv-secondary-01` |
+| Service Bus | `sb-mrkv-primary-01` | `sb-mrkv-secondary-01` |
 | Event Grid System Topic | `evgt-kv-mrkv-primary` | `evgt-kv-mrkv-secondary` |
-| Function App | `func-mrkv-primary` | `func-mrkv-secondary` |
-| Storage Account | `samrkvprimaryfunc` | `samrkvsecondaryfunc` |
+| Function App | `func-mrkv-primary-01` | `func-mrkv-secondary-01` |
+| Storage Account | `samrkvprimaryfunc01` | `samrkvsecondaryfunc01` |
 | App Service Plan | `asp-mrkv-primary` | `asp-mrkv-secondary` |
 
 ## Monitoring and health
 
 ### Key metrics to track
 
-- **Replication Lag**: Time between secret update and replication completion
+- **Replication Lag**: Time between secret or certificate update and replication completion
 - **Function Execution**: Success/failure rates, duration, exceptions
 - **Service Bus**: Queue depth, dead-letter queue messages
 - **Key Vault**: Request latency, throttling events, availability
@@ -946,6 +1021,7 @@ This deployment follows a consistent naming pattern:
 
 - **Function Managed Identities** require:
   - `Key Vault Secrets Officer` RBAC roles for secret operations
+  - `Key Vault Certificates Officer` RBAC roles for certificate import
   - Storage Blob Data Contributor role on storage accounts
   - Storage File Data SMB Share Contributor role on storage accounts
   - Storage Queue Data Contributor role on storage accounts
@@ -993,6 +1069,7 @@ The constraints of this architecture require certain resource types that have as
 #### Function Unable to Access Key Vault
 
 - Confirm Managed Identity has `Key Vault Secrets Officer` role assignment
+- For certificates, confirm Managed Identity also has `Key Vault Certificates Officer` on both vaults
 - Verify Function is VNet integrated
 - Check NSG rules on subnets
 - Validate Private Endpoint connections
@@ -1019,6 +1096,13 @@ The constraints of this architecture require certain resource types that have as
 - Review Function logs via `az webapp log tail` or `az webapp log download`
 - Validate cross-region private endpoints are healthy
 
+#### Certificate Not Replicating
+
+- Check Function logs for `private key is not exportable`; non-exportable certificates are skipped by design
+- Check for a plain secret in the destination vault with the same name as the certificate; import fails on the name conflict
+- Confirm the Event Grid subscriptions include the `Microsoft.KeyVault.Certificate*` event types
+- If the destination copy exists but no new version appears, check whether the source version already carries the `mrkv-replicated-from` tag
+
 ## Terraform state management
 
 The deployment uses local Terraform state by default. For team environments, use remote state:
@@ -1042,16 +1126,16 @@ terraform destroy -auto-approve
 ```
 
 > [!WARNING]
-> This command permanently deletes all resources including Key Vaults. Back up secrets before proceeding.
+> This command permanently deletes all resources including Key Vaults. Back up secrets and certificates before proceeding.
 
 ## Summary
 
 This Terraform deployment provides a production-ready foundation for:
 
-- **Cross-region secret replication** with private connectivity
+- **Cross-region secret and certificate replication** with private connectivity
 - **Business continuity** during regional degradation
 - **Zero Trust networking** with Private Endpoints and VNet integration
 - **Bi-directional replication** supporting fail-forward and fail-back
 - **Flexible architecture** adaptable to other region pairs
 
-The infrastructure is ready for Function code deployment and Event Grid configuration to enable automated secret replication.
+The infrastructure is ready for Function code deployment and Event Grid configuration to enable automated secret and certificate replication.
