@@ -45,6 +45,8 @@ typos.toml
 functionlogs.zip
 functionlogs/*
 functionlogs*
+functionapp.zip
+__pycache__/
 
 # OS files
 .DS_Store

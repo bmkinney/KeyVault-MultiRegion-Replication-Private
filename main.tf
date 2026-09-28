@@ -162,7 +162,7 @@ resource "azurerm_private_dns_zone_virtual_network_link" "sb_secondary" {
 }
 
 resource "azurerm_key_vault" "primary" {
-  name                            = "kv-mrkv-primary"
+  name                            = "kv-mrkv-primary-01"
   location                        = azurerm_resource_group.primary.location
   resource_group_name             = azurerm_resource_group.primary.name
   tenant_id                       = data.azurerm_client_config.this.tenant_id
@@ -175,7 +175,7 @@ resource "azurerm_key_vault" "primary" {
 }
 
 resource "azurerm_key_vault" "secondary" {
-  name                            = "kv-mrkv-secondary"
+  name                            = "kv-mrkv-secondary-01"
   location                        = azurerm_resource_group.secondary.location
   resource_group_name             = azurerm_resource_group.secondary.name
   tenant_id                       = data.azurerm_client_config.this.tenant_id
@@ -284,7 +284,7 @@ resource "azurerm_private_endpoint" "kv_secondary_remote" {
 }
 
 resource "azurerm_servicebus_namespace" "primary" {
-  name                = "sb-mrkv-primary"
+  name                = "sb-mrkv-primary-01"
   location            = azurerm_resource_group.primary.location
   resource_group_name = azurerm_resource_group.primary.name
   sku                 = "Premium"
@@ -296,7 +296,7 @@ resource "azurerm_servicebus_namespace" "primary" {
 }
 
 resource "azurerm_servicebus_namespace" "secondary" {
-  name                = "sb-mrkv-secondary"
+  name                = "sb-mrkv-secondary-01"
   location            = azurerm_resource_group.secondary.location
   resource_group_name = azurerm_resource_group.secondary.name
   sku                 = "Premium"
@@ -385,7 +385,10 @@ resource "azurerm_eventgrid_system_topic_event_subscription" "kv_to_sb_primary" 
   included_event_types = [
     "Microsoft.KeyVault.SecretNewVersionCreated",
     "Microsoft.KeyVault.SecretNearExpiry",
-    "Microsoft.KeyVault.SecretExpired"
+    "Microsoft.KeyVault.SecretExpired",
+    "Microsoft.KeyVault.CertificateNewVersionCreated",
+    "Microsoft.KeyVault.CertificateNearExpiry",
+    "Microsoft.KeyVault.CertificateExpired"
   ]
 
   depends_on = [
@@ -408,7 +411,10 @@ resource "azurerm_eventgrid_system_topic_event_subscription" "kv_to_sb_secondary
   included_event_types = [
     "Microsoft.KeyVault.SecretNewVersionCreated",
     "Microsoft.KeyVault.SecretNearExpiry",
-    "Microsoft.KeyVault.SecretExpired"
+    "Microsoft.KeyVault.SecretExpired",
+    "Microsoft.KeyVault.CertificateNewVersionCreated",
+    "Microsoft.KeyVault.CertificateNearExpiry",
+    "Microsoft.KeyVault.CertificateExpired"
   ]
 
   depends_on = [
@@ -448,7 +454,7 @@ resource "azurerm_private_dns_a_record" "kv_secondary_in_primary_zone" {
   ]
 }
 
- # Secondary VNet zone records - only IPs reachable from secondary VNet
+# Secondary VNet zone records - only IPs reachable from secondary VNet
 resource "azurerm_private_dns_a_record" "kv_primary_in_secondary_zone" {
   name                = azurerm_key_vault.primary.name
   zone_name           = azurerm_private_dns_zone.kv_secondary.name
@@ -481,7 +487,7 @@ resource "azurerm_private_dns_a_record" "kv_secondary_in_secondary_zone" {
 
 
 resource "azurerm_storage_account" "primary_func" {
-  name                          = "samrkvprimaryfunc"
+  name                          = "samrkvprimaryfunc01"
   resource_group_name           = azurerm_resource_group.primary.name
   location                      = azurerm_resource_group.primary.location
   account_tier                  = "Standard"
@@ -562,7 +568,7 @@ resource "azurerm_service_plan" "primary" {
 }
 
 resource "azurerm_linux_function_app" "primary" {
-  name                          = "func-mrkv-primary"
+  name                          = "func-mrkv-primary-01"
   location                      = azurerm_resource_group.primary.location
   resource_group_name           = azurerm_resource_group.primary.name
   service_plan_id               = azurerm_service_plan.primary.id
@@ -579,7 +585,7 @@ resource "azurerm_linux_function_app" "primary" {
     ServiceBusConnection__credential              = "managedidentity"
     FUNCTIONS_WORKER_RUNTIME                      = "python"
     WEBSITE_RUN_FROM_PACKAGE                      = "1"
-    AzureWebJobsStorage__accountName              = "samrkvprimaryfunc"
+    AzureWebJobsStorage__accountName              = azurerm_storage_account.primary_func.name
     AzureWebJobsStorage__credential               = "ManagedIdentity"
   }
 
@@ -629,7 +635,7 @@ resource "azurerm_role_assignment" "func_primary_queue" {
 # azurerm_storage_share resource cannot be used because Azure Policy blocks shared_access_key_enabled
 resource "null_resource" "func_primary_share" {
   provisioner "local-exec" {
-    command = "az storage share-rm create --storage-account samrkvprimaryfunc --name func-mrkv-primary-share --quota 100 --resource-group rg-mrkv-primary"
+    command = "az storage share-rm create --storage-account ${azurerm_storage_account.primary_func.name} --name func-mrkv-primary-share --quota 100 --resource-group rg-mrkv-primary"
   }
 
   depends_on = [
@@ -639,11 +645,11 @@ resource "null_resource" "func_primary_share" {
 }
 
 # Note: The 'site' directory in the file share should be created by the Function App at runtime
-# or manually using: az storage directory create --share-name func-mrkv-primary-share --name site --account-name samrkvprimaryfunc --auth-mode login --enable-file-backup-request-intent
+# or manually using: az storage directory create --share-name func-mrkv-primary-share --name site --account-name samrkvprimaryfunc01 --auth-mode login --enable-file-backup-request-intent
 
 
 resource "azurerm_storage_account" "secondary_func" {
-  name                          = "samrkvsecondaryfunc"
+  name                          = "samrkvsecondaryfunc01"
   resource_group_name           = azurerm_resource_group.secondary.name
   location                      = azurerm_resource_group.secondary.location
   account_tier                  = "Standard"
@@ -728,7 +734,7 @@ resource "azurerm_service_plan" "secondary" {
 }
 
 resource "azurerm_linux_function_app" "secondary" {
-  name                          = "func-mrkv-secondary"
+  name                          = "func-mrkv-secondary-01"
   location                      = azurerm_resource_group.secondary.location
   resource_group_name           = azurerm_resource_group.secondary.name
   service_plan_id               = azurerm_service_plan.secondary.id
@@ -745,7 +751,7 @@ resource "azurerm_linux_function_app" "secondary" {
     ServiceBusConnection__credential              = "managedidentity"
     FUNCTIONS_WORKER_RUNTIME                      = "python"
     WEBSITE_RUN_FROM_PACKAGE                      = "1"
-    AzureWebJobsStorage__accountName              = "samrkvsecondaryfunc"
+    AzureWebJobsStorage__accountName              = azurerm_storage_account.secondary_func.name
     AzureWebJobsStorage__credential               = "ManagedIdentity"
   }
 
@@ -794,7 +800,7 @@ resource "azurerm_role_assignment" "func_secondary_queue" {
 # Create the file share for secondary using ARM API (works without shared key access)
 resource "null_resource" "func_secondary_share" {
   provisioner "local-exec" {
-    command = "az storage share-rm create --storage-account samrkvsecondaryfunc --name func-mrkv-secondary-share --quota 100 --resource-group rg-mrkv-secondary"
+    command = "az storage share-rm create --storage-account ${azurerm_storage_account.secondary_func.name} --name func-mrkv-secondary-share --quota 100 --resource-group rg-mrkv-secondary"
   }
 
   depends_on = [
@@ -819,6 +825,22 @@ resource "azurerm_role_assignment" "func_primary_kv_primary_secret_officer" {
 resource "azurerm_role_assignment" "func_primary_kv_secondary_secret_officer" {
   scope                = azurerm_key_vault.secondary.id
   role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = azurerm_linux_function_app.primary.identity[0].principal_id
+
+  depends_on = [azurerm_linux_function_app.primary]
+}
+
+resource "azurerm_role_assignment" "func_primary_kv_primary_cert_officer" {
+  scope                = azurerm_key_vault.primary.id
+  role_definition_name = "Key Vault Certificates Officer"
+  principal_id         = azurerm_linux_function_app.primary.identity[0].principal_id
+
+  depends_on = [azurerm_linux_function_app.primary]
+}
+
+resource "azurerm_role_assignment" "func_primary_kv_secondary_cert_officer" {
+  scope                = azurerm_key_vault.secondary.id
+  role_definition_name = "Key Vault Certificates Officer"
   principal_id         = azurerm_linux_function_app.primary.identity[0].principal_id
 
   depends_on = [azurerm_linux_function_app.primary]
@@ -869,6 +891,22 @@ resource "azurerm_role_assignment" "func_secondary_kv_primary_secret_officer" {
 resource "azurerm_role_assignment" "func_secondary_kv_secondary_secret_officer" {
   scope                = azurerm_key_vault.secondary.id
   role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = azurerm_linux_function_app.secondary.identity[0].principal_id
+
+  depends_on = [azurerm_linux_function_app.secondary]
+}
+
+resource "azurerm_role_assignment" "func_secondary_kv_primary_cert_officer" {
+  scope                = azurerm_key_vault.primary.id
+  role_definition_name = "Key Vault Certificates Officer"
+  principal_id         = azurerm_linux_function_app.secondary.identity[0].principal_id
+
+  depends_on = [azurerm_linux_function_app.secondary]
+}
+
+resource "azurerm_role_assignment" "func_secondary_kv_secondary_cert_officer" {
+  scope                = azurerm_key_vault.secondary.id
+  role_definition_name = "Key Vault Certificates Officer"
   principal_id         = azurerm_linux_function_app.secondary.identity[0].principal_id
 
   depends_on = [azurerm_linux_function_app.secondary]
