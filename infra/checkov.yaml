@@ -1,0 +1,16 @@
+framework:
+  - arm
+skip-download: true
+skip-check:
+  # Private-only storage explicitly forbids trusted-service bypass.
+  - CKV_AZURE_36
+  # Nested ARM parameter names are not resolved by this rule; ARM validates actual names.
+  - CKV_AZURE_43
+  # Regional host/state storage retains Terraform's LRS placement, not paired-region replication.
+  - CKV_AZURE_206
+  # No HTTP triggers: requiring caller certificates or inventing an HTTP health route is inapplicable.
+  - CKV_AZURE_17
+  - CKV_AZURE_213
+  # EP1 single-instance/non-zonal sizing is retained; HA changes require region/quota/cost review.
+  - CKV_AZURE_212
+  - CKV_AZURE_225
