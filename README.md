@@ -1,7 +1,84 @@
 
 # Private, Asynchronous Multi‑Region Secret Replication for Azure Key Vault
 
-## Introduction
+## Deployment variants
+
+| Variant | Infrastructure | Runtime | Deployment guide |
+| --- | --- | --- | --- |
+| Private-endpoint-only, managed identity/RBAC | [`infra/main.bicep`](./infra/main.bicep) | [`private-functions/`](./private-functions/) timer polling and private Service Bus | [Bicep deployment README](./infra/README.md) or [Portal deployment guide](./docs/azure-portal-deployment-guide.md) |
+| Original Terraform reference | `main.tf` | `replicatefunc/`, Event Grid-driven | Original instructions below |
+
+**For strict private data-plane access, use the Bicep variant.** It disables public access and key authentication, uses identity-authenticated Blob packages instead of Azure Files, enables vault purge protection, and replaces Event Grid delivery with polling. Primary polling is active by default; enable secondary polling only during a controlled failover. Event Grid cannot deliver through private endpoints.
+
+The original Terraform and runtime are retained unchanged for reference; they are not the strict-private implementation and must not be mixed with the new package. No resources have been migrated automatically.
+
+## Private polling architecture
+
+The diagram shows the **Bicep solution**, not the legacy Event Grid design. Azure PaaS services and Function Apps are outside the VNets; the apps use delegated subnet integration for outbound calls through private endpoints. Both workers remain active, but only the primary polling producer starts enabled.
+
+Default template regions are shown; select different regions, such as East US/Central US, through the Bicep parameters.
+
+```mermaid
+flowchart TB
+    Admin["Existing private build / admin hosts<br/>Upload prebuilt ZIP with Entra RBAC"]
+
+    subgraph Primary["Primary - South Central US"]
+        PApp["EP1 Function App + managed identity<br/>Poller ON / worker ON"]
+        subgraph PVNet["Primary VNet - separate integration and PE subnets"]
+            PAccess["Private endpoint paths - 8<br/>Both vaults + both Service Bus namespaces<br/>Local Blob / Queue / Table + app / SCM"]
+            PDNS["6 local private DNS zones"]
+        end
+        PKV["Primary Key Vault<br/>Secrets + purge protection"]
+        PBus["Primary Service Bus Premium<br/>kv-events + dead-letter queue"]
+        PStorage["Primary private StorageV2<br/>Package / host / operation state"]
+    end
+
+    subgraph Secondary["Secondary - Sweden Central"]
+        SApp["EP1 Function App + managed identity<br/>Poller OFF until failover / worker ON"]
+        subgraph SVNet["Secondary VNet - separate integration and PE subnets"]
+            SAccess["Private endpoint paths - 8<br/>Both vaults + both Service Bus namespaces<br/>Local Blob / Queue / Table + app / SCM"]
+            SDNS["6 local private DNS zones"]
+        end
+        SKV["Secondary Key Vault<br/>Secrets + purge protection"]
+        SBus["Secondary Service Bus Premium<br/>kv-events + dead-letter queue"]
+        SStorage["Secondary private StorageV2<br/>Package / host / operation state"]
+    end
+
+    PApp -->|"Outbound VNet integration"| PAccess
+    SApp -->|"Outbound VNet integration"| SAccess
+    PDNS -.->|"VNet link"| PAccess
+    SDNS -.->|"VNet link"| SAccess
+    Admin -->|"Private package upload"| PAccess
+    Admin -->|"Private package upload"| SAccess
+
+    PAccess -->|"Poll / local writes"| PKV
+    SAccess -->|"Write replica / failover poll"| SKV
+    SAccess -->|"Worker reads source version"| PKV
+    PAccess -->|"Worker reads remote version"| SKV
+    PAccess -->|"Send version references"| SBus
+    SAccess -->|"Worker consumes"| SBus
+    SAccess -.->|"Failover: send references"| PBus
+    PAccess -->|"Worker consumes"| PBus
+    PAccess -->|"MI package fetch + state"| PStorage
+    SAccess -->|"MI package fetch + state"| SStorage
+
+    classDef app fill:#E8DAEF,stroke:#5C2D91,color:#000;
+    classDef endpoint fill:#CFE4FA,stroke:#0078D4,color:#000;
+    classDef service fill:#DFF6DD,stroke:#107C10,color:#000;
+    class PApp,SApp app;
+    class PAccess,SAccess endpoint;
+    class PKV,SKV,PBus,SBus,PStorage,SStorage service;
+```
+
+**Normal flow:** primary poller reads a local secret version, enqueues its reference in the secondary queue, and the secondary worker reads that source version and writes its local vault. Private Blob operation state prevents replication loops and deduplicates normal retries. The dashed send path is activated only during a controlled failover with the old writer fenced.
+
+**Network boundary:** 16 private endpoints and 12 private DNS zones; no VNet peering, Event Grid delivery, trusted-service bypass, Azure Files, storage keys, or SAS credentials. Public data-plane access is disabled. ARM, operator Entra authentication, and build-feed/control-plane connectivity are not shown and are not made private by this template.
+
+**Architecture source documentation:** [Private endpoint overview](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview), [private DNS configuration](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-dns), [Functions networking](https://learn.microsoft.com/en-us/azure/azure-functions/functions-networking-options), [Event Grid private delivery limitation](https://learn.microsoft.com/en-us/azure/event-grid/managed-service-identity#private-endpoints), and [GitHub Mermaid rendering](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-diagrams).
+
+Full source-reference appendices are included in the [Bicep README](./infra/README.md#appendix---source-documentation) and [Portal guide](./docs/azure-portal-deployment-guide.md#appendix---source-documentation).
+
+## Original Terraform introduction
 
 This Terraform deployment implements a **private, asynchronous, multi‑region secret replication architecture for Azure Key Vault**. The pattern enables organizations to maintain business continuity before a Microsoft‑declared regional outage. It ensures that a secondary region (Sweden Central) always contains an up‑to‑date replica of secrets stored in the primary region (South Central US).
 

@@ -45,6 +45,15 @@ typos.toml
 functionlogs.zip
 functionlogs/*
 functionlogs*
+functionapp.zip
+__pycache__/
+*.py[cod]
+private-functions/bin/
+private-functions/obj/
+private-functions/.python_packages/
+.venv-review/
+infra/main.json
+infra/main.parameters.json
 
 # OS files
 .DS_Store
